@@ -19,6 +19,8 @@ import (
 	chunk "github.com/ipfs/go-ipfs/importer/chunk"
 	dag "github.com/ipfs/go-ipfs/merkledag"
 	dagutils "github.com/ipfs/go-ipfs/merkledag/utils"
+
+	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
 	path "github.com/ipfs/go-ipfs/path"
 	"github.com/ipfs/go-ipfs/routing"
 	uio "github.com/ipfs/go-ipfs/unixfs/io"
@@ -32,13 +34,13 @@ const (
 // gatewayHandler is a HTTP handler that serves IPFS objects (accessible by default at /ipfs/<path>)
 // (it serves requests like GET /ipfs/QmVRzPKPzNtSrEzBFm2UZfxmPAgnaLke4DMcerbsGGSaFe/link)
 type gatewayHandler struct {
-	node   *core.IpfsNode
+	api    coreiface.CoreAPI
 	config GatewayConfig
 }
 
-func newGatewayHandler(node *core.IpfsNode, conf GatewayConfig) *gatewayHandler {
+func newGatewayHandler(api coreiface.CoreAPI, conf GatewayConfig) *gatewayHandler {
 	i := &gatewayHandler{
-		node:   node,
+		api:    api,
 		config: conf,
 	}
 	return i
@@ -47,9 +49,9 @@ func newGatewayHandler(node *core.IpfsNode, conf GatewayConfig) *gatewayHandler 
 // TODO(cryptix):  find these helpers somewhere else
 func (i *gatewayHandler) newDagFromReader(r io.Reader) (*dag.Node, error) {
 	// TODO(cryptix): change and remove this helper once PR1136 is merged
-	// return ufs.AddFromReader(i.node, r.Body)
+	// return ufs.AddFromReader(i.api.IpfsNode(), r.Body)
 	return importer.BuildDagFromReader(
-		i.node.DAG,
+		i.api.IpfsNode().DAG,
 		chunk.DefaultSplitter(r))
 }
 
@@ -109,7 +111,7 @@ func (i *gatewayHandler) optionsHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func (i *gatewayHandler) getOrHeadHandler(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(i.node.Context(), time.Hour)
+	ctx, cancel := context.WithTimeout(i.api.Context(), time.Hour)
 	// the hour is a hard fallback, we don't expect it to happen, but just in case
 	defer cancel()
 
@@ -152,15 +154,19 @@ func (i *gatewayHandler) getOrHeadHandler(w http.ResponseWriter, r *http.Request
 		ipnsHostname = true
 	}
 
-	nd, err := core.Resolve(ctx, i.node, path.Path(urlPath))
-	// If node is in offline mode the error code and message should be different
-	if err == core.ErrNoNamesys && !i.node.OnlineMode() {
+	dr, err := i.api.Cat(urlPath)
+	dir := false
+	if err == coreiface.ErrOffline {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		fmt.Fprint(w, "Could not resolve path. Node is in offline mode.")
 		return
+	} else if err == coreiface.ErrDir {
+		dir = true
 	} else if err != nil {
 		webError(w, "Path Resolve error", err, http.StatusBadRequest)
 		return
+	} else {
+		defer dr.Close()
 	}
 
 	etag := gopath.Base(urlPath)
@@ -190,13 +196,6 @@ func (i *gatewayHandler) getOrHeadHandler(w http.ResponseWriter, r *http.Request
 		w.Header().Set("Suborigin", pathRoot)
 	}
 
-	dr, err := uio.NewDagReader(ctx, nd, i.node.DAG)
-	if err != nil && err != uio.ErrIsDir {
-		// not a directory and still an error
-		internalWebError(w, err)
-		return
-	}
-
 	// set these headers _after_ the error, for we may just not have it
 	// and dont want the client to cache a 500 response...
 	// and only if it's /ipfs!
@@ -210,10 +209,15 @@ func (i *gatewayHandler) getOrHeadHandler(w http.ResponseWriter, r *http.Request
 		modtime = time.Unix(1, 0)
 	}
 
-	if err == nil {
-		defer dr.Close()
+	if !dir {
 		name := gopath.Base(urlPath)
 		http.ServeContent(w, r, name, modtime, dr)
+		return
+	}
+
+	links, err := i.api.Ls(urlPath)
+	if err != nil {
+		internalWebError(w, err)
 		return
 	}
 
@@ -221,7 +225,7 @@ func (i *gatewayHandler) getOrHeadHandler(w http.ResponseWriter, r *http.Request
 	var dirListing []directoryItem
 	// loop through files
 	foundIndex := false
-	for _, link := range nd.Links {
+	for _, link := range links {
 		if link.Name == "index.html" {
 			log.Debugf("found index.html link for %s", urlPath)
 			foundIndex = true
@@ -234,20 +238,15 @@ func (i *gatewayHandler) getOrHeadHandler(w http.ResponseWriter, r *http.Request
 			}
 
 			// return index page instead.
-			nd, err := core.Resolve(ctx, i.node, path.Path(urlPath+"/index.html"))
+			ir, err := i.api.Cat(urlPath + "/index.html")
 			if err != nil {
 				internalWebError(w, err)
 				return
 			}
-			dr, err := uio.NewDagReader(ctx, nd, i.node.DAG)
-			if err != nil {
-				internalWebError(w, err)
-				return
-			}
-			defer dr.Close()
+			defer ir.Close()
 
 			// write to request
-			http.ServeContent(w, r, "index.html", modtime, dr)
+			http.ServeContent(w, r, "index.html", modtime, ir)
 			break
 		}
 
@@ -312,7 +311,7 @@ func (i *gatewayHandler) postHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	k, err := i.node.DAG.Add(nd)
+	k, err := i.api.IpfsNode().DAG.Add(nd)
 	if err != nil {
 		internalWebError(w, err)
 		return
@@ -325,7 +324,7 @@ func (i *gatewayHandler) postHandler(w http.ResponseWriter, r *http.Request) {
 
 func (i *gatewayHandler) putHandler(w http.ResponseWriter, r *http.Request) {
 	// TODO(cryptix): move me to ServeHTTP and pass into all handlers
-	ctx, cancel := context.WithCancel(i.node.Context())
+	ctx, cancel := context.WithCancel(i.api.IpfsNode().Context())
 	defer cancel()
 
 	rootPath, err := path.ParsePath(r.URL.Path)
@@ -358,26 +357,26 @@ func (i *gatewayHandler) putHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var newkey key.Key
-	rnode, err := core.Resolve(ctx, i.node, rootPath)
+	rnode, err := core.Resolve(ctx, i.api.IpfsNode(), rootPath)
 	switch ev := err.(type) {
 	case path.ErrNoLink:
 		// ev.Node < node where resolve failed
 		// ev.Name < new link
 		// but we need to patch from the root
-		rnode, err := i.node.DAG.Get(ctx, key.B58KeyDecode(rsegs[1]))
+		rnode, err := i.api.IpfsNode().DAG.Get(ctx, key.B58KeyDecode(rsegs[1]))
 		if err != nil {
 			webError(w, "putHandler: Could not create DAG from request", err, http.StatusInternalServerError)
 			return
 		}
 
-		e := dagutils.NewDagEditor(rnode, i.node.DAG)
+		e := dagutils.NewDagEditor(rnode, i.api.IpfsNode().DAG)
 		err = e.InsertNodeAtPath(ctx, newPath, newnode, uio.NewEmptyDirectory)
 		if err != nil {
 			webError(w, "putHandler: InsertNodeAtPath failed", err, http.StatusInternalServerError)
 			return
 		}
 
-		nnode, err := e.Finalize(i.node.DAG)
+		nnode, err := e.Finalize(i.api.IpfsNode().DAG)
 		if err != nil {
 			webError(w, "putHandler: could not get node", err, http.StatusInternalServerError)
 			return
@@ -393,7 +392,7 @@ func (i *gatewayHandler) putHandler(w http.ResponseWriter, r *http.Request) {
 		// object set-data case
 		rnode.Data = newnode.Data
 
-		newkey, err = i.node.DAG.Add(rnode)
+		newkey, err = i.api.IpfsNode().DAG.Add(rnode)
 		if err != nil {
 			nnk, _ := newnode.Key()
 			rk, _ := rnode.Key()
@@ -413,10 +412,10 @@ func (i *gatewayHandler) putHandler(w http.ResponseWriter, r *http.Request) {
 
 func (i *gatewayHandler) deleteHandler(w http.ResponseWriter, r *http.Request) {
 	urlPath := r.URL.Path
-	ctx, cancel := context.WithCancel(i.node.Context())
+	ctx, cancel := context.WithCancel(i.api.IpfsNode().Context())
 	defer cancel()
 
-	ipfsNode, err := core.Resolve(ctx, i.node, path.Path(urlPath))
+	ipfsNode, err := core.Resolve(ctx, i.api.IpfsNode(), path.Path(urlPath))
 	if err != nil {
 		// FIXME HTTP error code
 		webError(w, "Could not resolve name", err, http.StatusInternalServerError)
@@ -437,13 +436,13 @@ func (i *gatewayHandler) deleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	tctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	rootnd, err := i.node.Resolver.DAG.Get(tctx, key.Key(h))
+	rootnd, err := i.api.IpfsNode().Resolver.DAG.Get(tctx, key.Key(h))
 	if err != nil {
 		webError(w, "Could not resolve root object", err, http.StatusBadRequest)
 		return
 	}
 
-	pathNodes, err := i.node.Resolver.ResolveLinks(tctx, rootnd, components[:len(components)-1])
+	pathNodes, err := i.api.IpfsNode().Resolver.ResolveLinks(tctx, rootnd, components[:len(components)-1])
 	if err != nil {
 		webError(w, "Could not resolve parent object", err, http.StatusBadRequest)
 		return
@@ -458,7 +457,7 @@ func (i *gatewayHandler) deleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	newnode := pathNodes[len(pathNodes)-1]
 	for j := len(pathNodes) - 2; j >= 0; j-- {
-		if _, err := i.node.DAG.Add(newnode); err != nil {
+		if _, err := i.api.IpfsNode().DAG.Add(newnode); err != nil {
 			webError(w, "Could not add node", err, http.StatusInternalServerError)
 			return
 		}
@@ -469,7 +468,7 @@ func (i *gatewayHandler) deleteHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if _, err := i.node.DAG.Add(newnode); err != nil {
+	if _, err := i.api.IpfsNode().DAG.Add(newnode); err != nil {
 		webError(w, "Could not add root node", err, http.StatusInternalServerError)
 		return
 	}

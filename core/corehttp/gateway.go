@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	core "github.com/ipfs/go-ipfs/core"
+	coreapi "github.com/ipfs/go-ipfs/core/coreapi"
 	config "github.com/ipfs/go-ipfs/repo/config"
 	id "gx/ipfs/QmdBpVuSYuTGDA8Kn66CbKvEThXqKUh2nTANZEhzSxqrmJ/go-libp2p/p2p/protocol/identify"
 )
@@ -18,12 +19,17 @@ type GatewayConfig struct {
 
 func GatewayOption(paths ...string) ServeOption {
 	return func(n *core.IpfsNode, _ net.Listener, mux *http.ServeMux) (*http.ServeMux, error) {
+		api, err := coreapi.NewCoreAPI(n.Context(), n)
+		if err != nil {
+			return nil, err
+		}
+
 		cfg, err := n.Repo.Config()
 		if err != nil {
 			return nil, err
 		}
 
-		gateway := newGatewayHandler(n, GatewayConfig{
+		gateway := newGatewayHandler(api, GatewayConfig{
 			Headers:      cfg.Gateway.HTTPHeaders,
 			Writable:     cfg.Gateway.Writable,
 			PathPrefixes: cfg.Gateway.PathPrefixes,
@@ -37,7 +43,7 @@ func GatewayOption(paths ...string) ServeOption {
 }
 
 func VersionOption() ServeOption {
-	return func(n *core.IpfsNode, _ net.Listener, mux *http.ServeMux) (*http.ServeMux, error) {
+	return func(_ *core.IpfsNode, _ net.Listener, mux *http.ServeMux) (*http.ServeMux, error) {
 		mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "Commit: %s\n", config.CurrentCommit)
 			fmt.Fprintf(w, "Client Version: %s\n", id.ClientVersion)
