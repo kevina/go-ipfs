@@ -1,20 +1,20 @@
 package dht
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
-	"io"
+	"strings"
 	"time"
 
-	key "github.com/ipfs/go-ipfs/blocks/key"
 	peer "gx/ipfs/QmQGwpJy9P4yXZySmqkZEXCmbBpJUb8xntCv8Ca4taZwDC/go-libp2p-peer"
 	goprocess "gx/ipfs/QmQopLATEYMNg7dVqZRNDfeE2S1yKy8zrRh5xnYiuqeZBn/goprocess"
 	goprocessctx "gx/ipfs/QmQopLATEYMNg7dVqZRNDfeE2S1yKy8zrRh5xnYiuqeZBn/goprocess/context"
 	lru "gx/ipfs/QmVYxfoJQiZijTgPNHCHgHELvQpbsJNTg6Crmc3dQkj3yy/golang-lru"
 	ds "gx/ipfs/QmZ6A6P6AMo8SR3jXAwzTuSU6B9R2Y4eqW2yW9VvfUayDN/go-datastore"
 	dsq "gx/ipfs/QmZ6A6P6AMo8SR3jXAwzTuSU6B9R2Y4eqW2yW9VvfUayDN/go-datastore/query"
+
+	key "github.com/ipfs/go-ipfs/blocks/key"
 
 	context "gx/ipfs/QmZy2y8t9zQH2a1b8q2ZSLKp17ATuJoCNxxyMFG5qFExpt/go-net/context"
 )
@@ -78,7 +78,7 @@ func NewProviderManager(ctx context.Context, local peer.ID, dstore ds.Datastore)
 const providersKeyPrefix = "/providers/"
 
 func mkProvKey(k key.Key) ds.Key {
-	return ds.NewKey(providersKeyPrefix + string(k))
+	return ds.NewKey(providersKeyPrefix + hex.EncodeToString([]byte(k)))
 }
 
 func (pm *ProviderManager) getProvs(k key.Key) ([]peer.ID, error) {
@@ -90,17 +90,59 @@ func (pm *ProviderManager) getProvs(k key.Key) ([]peer.ID, error) {
 }
 
 func (pm *ProviderManager) getPset(k key.Key) (*providerSet, error) {
-	iprovs, ok := pm.providers.Get(k)
+	cached, ok := pm.providers.Get(k)
 	if ok {
-		provs := iprovs.(*providerSet)
-		return provs, nil
+		return cached.(*providerSet), nil
 	}
-	pset, err := pm.loadProvSet(k)
+
+	out := newProviderSet()
+	res, err := pm.dstore.Query(dsq.Query{
+		Prefix: mkProvKey(k).String(),
+	})
 	if err != nil {
 		return nil, err
 	}
-	pm.providers.Add(k, pset)
-	return pset, nil
+
+	for e := range res.Next() {
+		if e.Error != nil {
+			log.Error("got an error: ", err)
+			continue
+		}
+		parts := strings.Split(e.Key, "/")
+		if len(parts) != 4 {
+			log.Warning("incorrectly formatted key: ", e.Key)
+			continue
+		}
+
+		decstr, err := hex.DecodeString(parts[len(parts)-1])
+		if err != nil {
+			log.Error("hex decoding error: ", err)
+			continue
+		}
+
+		pid := peer.ID(decstr)
+
+		t, err := readTimeValue(e.Value)
+		if err != nil {
+			log.Warning("parsing providers record from disk: ", err)
+			continue
+		}
+
+		out.setVal(pid, t)
+	}
+
+	return out, nil
+}
+
+func readTimeValue(i interface{}) (time.Time, error) {
+	data, ok := i.([]byte)
+	if !ok {
+		return time.Time{}, fmt.Errorf("data was not a []byte")
+	}
+
+	nsec, _ := binary.Varint(data)
+
+	return time.Unix(0, nsec), nil
 }
 
 func (pm *ProviderManager) addProv(k key.Key, p peer.ID) error {
@@ -110,45 +152,41 @@ func (pm *ProviderManager) addProv(k key.Key, p peer.ID) error {
 		pm.providers.Add(k, iprovs)
 	}
 	provs := iprovs.(*providerSet)
-	provs.Add(p)
+	now := time.Now()
+	provs.setVal(p, now)
 
-	return pm.storeProvSet(k, provs)
+	return pm.writeProviderEntry(k, p, now)
 }
 
-func (pm *ProviderManager) storeProvSet(k key.Key, pset *providerSet) error {
-	buf := new(bytes.Buffer)
-	_, err := pset.WriteTo(buf)
-	if err != nil {
-		return err
-	}
+func (pm *ProviderManager) writeProviderEntry(k key.Key, p peer.ID, t time.Time) error {
+	dsk := mkProvKey(k).ChildString(hex.EncodeToString([]byte(p)))
 
-	return pm.dstore.Put(mkProvKey(k), buf.Bytes())
-}
+	buf := make([]byte, 16)
+	n := binary.PutVarint(buf, t.UnixNano())
 
-func (pm *ProviderManager) loadProvSet(k key.Key) (*providerSet, error) {
-	val, err := pm.dstore.Get(mkProvKey(k))
-	if err != nil {
-		return nil, err
-	}
-
-	valb, ok := val.([]byte)
-	if !ok {
-		log.Errorf("value for providers set was not bytes. (instead got %#v)", val)
-		return nil, fmt.Errorf("value was not bytes!")
-	}
-
-	pset, err := psetFromReader(bytes.NewReader(valb))
-	if err != nil {
-		return nil, err
-	}
-
-	return pset, nil
+	return pm.dstore.Put(dsk, buf[:n])
 }
 
 func (pm *ProviderManager) deleteProvSet(k key.Key) error {
 	pm.providers.Remove(k)
 
-	return pm.dstore.Delete(mkProvKey(k))
+	res, err := pm.dstore.Query(dsq.Query{
+		KeysOnly: true,
+		Prefix:   mkProvKey(k).String(),
+	})
+
+	entries, err := res.Rest()
+	if err != nil {
+		return err
+	}
+
+	for _, e := range entries {
+		err := pm.dstore.Delete(ds.NewKey(e.Key))
+		if err != nil {
+			log.Error("deleting provider set: ", err)
+		}
+	}
+	return nil
 }
 
 func (pm *ProviderManager) getAllProvKeys() ([]key.Key, error) {
@@ -167,9 +205,24 @@ func (pm *ProviderManager) getAllProvKeys() ([]key.Key, error) {
 	}
 
 	out := make([]key.Key, 0, len(entries))
+	seen := make(map[key.Key]struct{})
 	for _, e := range entries {
-		prov := key.Key(e.Key[len(providersKeyPrefix):])
-		out = append(out, prov)
+		parts := strings.Split(e.Key, "/")
+		if len(parts) != 4 {
+			log.Warning("incorrectly formatted provider entry in datastore")
+			continue
+		}
+		decoded, err := hex.DecodeString(parts[2])
+		if err != nil {
+			log.Warning("error decoding hex provider key")
+			continue
+		}
+
+		k := key.Key(decoded)
+		if _, ok := seen[k]; !ok {
+			out = append(out, key.Key(decoded))
+			seen[k] = struct{}{}
+		}
 	}
 
 	return out, nil
@@ -279,81 +332,14 @@ func newProviderSet() *providerSet {
 }
 
 func (ps *providerSet) Add(p peer.ID) {
+	ps.setVal(p, time.Now())
+}
+
+func (ps *providerSet) setVal(p peer.ID, t time.Time) {
 	_, found := ps.set[p]
 	if !found {
 		ps.providers = append(ps.providers, p)
 	}
 
-	ps.set[p] = time.Now()
-}
-
-func psetFromReader(r io.Reader) (*providerSet, error) {
-	br, ok := r.(io.ByteReader)
-	if !ok {
-		bufr := bufio.NewReader(r)
-		br = bufr
-		r = bufr
-	}
-
-	out := newProviderSet()
-	buf := make([]byte, 128)
-	for {
-		v, err := binary.ReadUvarint(br)
-		if err != nil {
-			if err == io.EOF {
-				return out, nil
-			}
-			return nil, err
-		}
-
-		_, err = io.ReadFull(r, buf[:v])
-		if err != nil {
-			if err == io.EOF {
-				return out, nil
-			}
-			return nil, err
-		}
-
-		pid := peer.ID(buf[:v])
-
-		tnsec, err := binary.ReadVarint(br)
-		if err != nil {
-			if err == io.EOF {
-				return out, nil
-			}
-			return nil, err
-		}
-
-		t := time.Unix(0, tnsec)
-		out.set[pid] = t
-		out.providers = append(out.providers, pid)
-	}
-}
-
-func (ps *providerSet) WriteTo(w io.Writer) (int64, error) {
-	var written int64
-	buf := make([]byte, 16)
-	for _, p := range ps.providers {
-		t := ps.set[p]
-		id := []byte(p)
-		n := binary.PutUvarint(buf, uint64(len(id)))
-		_, err := w.Write(buf[:n])
-		if err != nil {
-			return written, err
-		}
-		written += int64(n)
-		n, err = w.Write(id)
-		if err != nil {
-			return written, err
-		}
-
-		written += int64(n)
-		n = binary.PutVarint(buf, t.UnixNano())
-		_, err = w.Write(buf[:n])
-		if err != nil {
-			return written, err
-		}
-	}
-
-	return written, nil
+	ps.set[p] = t
 }
