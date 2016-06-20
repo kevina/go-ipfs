@@ -1,4 +1,4 @@
-package dht
+package providers
 
 import (
 	"encoding/binary"
@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	logging "gx/ipfs/QmNQynaz7qfriSUJkiEZUrm2Wen1u3Kj9goZzWtrPyu7XR/go-log"
 	peer "gx/ipfs/QmQGwpJy9P4yXZySmqkZEXCmbBpJUb8xntCv8Ca4taZwDC/go-libp2p-peer"
 	goprocess "gx/ipfs/QmQopLATEYMNg7dVqZRNDfeE2S1yKy8zrRh5xnYiuqeZBn/goprocess"
 	goprocessctx "gx/ipfs/QmQopLATEYMNg7dVqZRNDfeE2S1yKy8zrRh5xnYiuqeZBn/goprocess/context"
@@ -18,6 +19,8 @@ import (
 
 	context "gx/ipfs/QmZy2y8t9zQH2a1b8q2ZSLKp17ATuJoCNxxyMFG5qFExpt/go-net/context"
 )
+
+var log = logging.Logger("providers")
 
 var lruCacheSize = 256
 var ProvideValidity = time.Hour * 24
@@ -81,28 +84,43 @@ func mkProvKey(k key.Key) ds.Key {
 	return ds.NewKey(providersKeyPrefix + hex.EncodeToString([]byte(k)))
 }
 
-func (pm *ProviderManager) getProvs(k key.Key) ([]peer.ID, error) {
-	pset, err := pm.getPset(k)
+func (pm *ProviderManager) Process() goprocess.Process {
+	return pm.proc
+}
+
+func (pm *ProviderManager) providersForKey(k key.Key) ([]peer.ID, error) {
+	pset, err := pm.getProvSet(k)
 	if err != nil {
 		return nil, err
 	}
 	return pset.providers, nil
 }
 
-func (pm *ProviderManager) getPset(k key.Key) (*providerSet, error) {
+func (pm *ProviderManager) getProvSet(k key.Key) (*providerSet, error) {
 	cached, ok := pm.providers.Get(k)
 	if ok {
 		return cached.(*providerSet), nil
 	}
 
-	out := newProviderSet()
-	res, err := pm.dstore.Query(dsq.Query{
-		Prefix: mkProvKey(k).String(),
-	})
+	pset, err := loadProvSet(pm.dstore, k)
 	if err != nil {
 		return nil, err
 	}
 
+	if len(pset.providers) > 0 {
+		pm.providers.Add(k, pset)
+	}
+
+	return pset, nil
+}
+
+func loadProvSet(dstore ds.Datastore, k key.Key) (*providerSet, error) {
+	res, err := dstore.Query(dsq.Query{Prefix: mkProvKey(k).String()})
+	if err != nil {
+		return nil, err
+	}
+
+	out := newProviderSet()
 	for e := range res.Next() {
 		if e.Error != nil {
 			log.Error("got an error: ", err)
@@ -241,7 +259,7 @@ func (pm *ProviderManager) run() {
 				log.Error("error adding new providers: ", err)
 			}
 		case gp := <-pm.getprovs:
-			provs, err := pm.getProvs(gp.k)
+			provs, err := pm.providersForKey(gp.k)
 			if err != nil && err != ds.ErrNotFound {
 				log.Error("error reading providers: ", err)
 			}
@@ -261,7 +279,7 @@ func (pm *ProviderManager) run() {
 				continue
 			}
 			for _, k := range keys {
-				provs, err := pm.getPset(k)
+				provs, err := pm.getProvSet(k)
 				if err != nil {
 					log.Error("error loading known provset: ", err)
 					continue
