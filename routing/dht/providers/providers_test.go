@@ -33,6 +33,7 @@ func TestProvidersDatastore(t *testing.T) {
 	ctx := context.Background()
 	mid := peer.ID("testing")
 	p := NewProviderManager(ctx, mid, ds.NewMapDatastore())
+	defer p.proc.Close()
 
 	friend := peer.ID("friend")
 	var keys []key.Key
@@ -51,7 +52,33 @@ func TestProvidersDatastore(t *testing.T) {
 			t.Fatal("expected provider to be 'friend'")
 		}
 	}
-	p.proc.Close()
+}
+
+func TestProvidersSerialization(t *testing.T) {
+	dstore := ds.NewMapDatastore()
+
+	k := key.Key("my key!")
+	p := peer.ID("my peer")
+	pt := time.Now()
+
+	err := writeProviderEntry(dstore, k, p, pt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pset, err := loadProvSet(dstore, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lt, ok := pset.set[p]
+	if !ok {
+		t.Fatal("failed to load set correctly")
+	}
+
+	if pt != lt {
+		t.Fatal("time wasnt serialized correctly")
+	}
 }
 
 func TestProvidesExpire(t *testing.T) {

@@ -173,16 +173,16 @@ func (pm *ProviderManager) addProv(k key.Key, p peer.ID) error {
 	now := time.Now()
 	provs.setVal(p, now)
 
-	return pm.writeProviderEntry(k, p, now)
+	return writeProviderEntry(pm.dstore, k, p, now)
 }
 
-func (pm *ProviderManager) writeProviderEntry(k key.Key, p peer.ID, t time.Time) error {
+func writeProviderEntry(dstore ds.Datastore, k key.Key, p peer.ID, t time.Time) error {
 	dsk := mkProvKey(k).ChildString(base64.RawURLEncoding.EncodeToString([]byte(p)))
 
 	buf := make([]byte, 16)
 	n := binary.PutVarint(buf, t.UnixNano())
 
-	return pm.dstore.Put(dsk, buf[:n])
+	return dstore.Put(dsk, buf[:n])
 }
 
 func (pm *ProviderManager) deleteProvSet(k key.Key) error {
