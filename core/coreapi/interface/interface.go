@@ -12,10 +12,17 @@ import (
 
 type CoreAPI interface {
 	Context() context.Context
-	IpfsNode() *core.IpfsNode // XXX temporary
-	Cat(string) (Data, error)
-	Ls(string) ([]Link, error)
+	IpfsNode() *core.IpfsNode                       // XXX temporary
+	Cat(Path) (Data, error)                         // http GET
+	Ls(Path) ([]Link, error)                        // http GET, PUT
+	Add(Data) (Path, error)                         // http POST
+	ObjectSetData(Path, Data) (Path, error)         // http PUT update
+	ObjectAddLink(Path, string, Path) (Path, error) // http PUT create
+	ObjectRmLink(Path, string, Path) (Path, error)  // http DELETE
+	// PUT and DELETE only for subdirs: /ipfs/<hash>/foo ???
 }
+
+type Path string
 
 type Object struct {
 	Links []Link

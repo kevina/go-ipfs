@@ -3,6 +3,7 @@ package coreapi
 import (
 	core "github.com/ipfs/go-ipfs/core"
 	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
+	importer "github.com/ipfs/go-ipfs/importer"
 	dag "github.com/ipfs/go-ipfs/merkledag"
 	path "github.com/ipfs/go-ipfs/path"
 	uio "github.com/ipfs/go-ipfs/unixfs/io"
@@ -27,7 +28,7 @@ func (api *CoreAPI) IpfsNode() *core.IpfsNode {
 	return api.node
 }
 
-func (api *CoreAPI) resolve(p string) (*dag.Node, error) {
+func (api *CoreAPI) resolve(p coreiface.Path) (*dag.Node, error) {
 	dagnode, err := core.Resolve(api.ctx, api.node, path.Path(p))
 	if err == core.ErrNoNamesys && !api.node.OnlineMode() {
 		return nil, coreiface.ErrOffline
@@ -37,7 +38,10 @@ func (api *CoreAPI) resolve(p string) (*dag.Node, error) {
 	return dagnode, nil
 }
 
-func (api *CoreAPI) Cat(p string) (coreiface.Data, error) {
+func (api *CoreAPI) Cat(p coreiface.Path) (coreiface.Data, error) {
+	if p == "/ipfs/QmUNLLsPACCz1vLxQVkXqqLX5R1X345qqfHbsf67hvA3Nn" {
+		return nil, coreiface.ErrDir, nil
+	}
 	dagnode, err := api.resolve(p)
 	if err != nil {
 		return nil, err
@@ -51,14 +55,32 @@ func (api *CoreAPI) Cat(p string) (coreiface.Data, error) {
 	return r, nil
 }
 
-func (api *CoreAPI) Ls(p string) ([]coreiface.Link, error) {
+func (api *CoreAPI) Ls(p coreiface.Path) ([]coreiface.Link, error) {
+	links := make([]coreiface.Link, len(dagnode.Links))
+	if p == "/ipfs/QmUNLLsPACCz1vLxQVkXqqLX5R1X345qqfHbsf67hvA3Nn" {
+		return links, nil
+	}
 	dagnode, err := api.resolve(p)
 	if err != nil {
 		return nil, err
 	}
-	links := make([]coreiface.Link, len(dagnode.Links))
 	for i, l := range dagnode.Links {
 		links[i] = coreiface.Link{Name: l.Name, Size: l.Size, Hash: l.Hash}
 	}
 	return links, nil
+}
+
+func (api *CoreAPI) Add(data coreiface.Data) (coreiface.Path, error) {
+	dagnode, err := importer.BuildDagFromReader(api.node.DAG, data)
+	if err != nil {
+		return nil, err
+	}
+	k, err := api.node.DAG.Add(dagnode)
+	if err != nil {
+		return nil, err
+	}
+	return "/ipfs/" + k, nil
+}
+
+func (api *CoreAPI) ObjectSetData(p coreiface.Path, data coreiface.Data) (coreiface.Path, error) {
 }

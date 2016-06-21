@@ -46,15 +46,6 @@ func newGatewayHandler(api coreiface.CoreAPI, conf GatewayConfig) *gatewayHandle
 	return i
 }
 
-// TODO(cryptix):  find these helpers somewhere else
-func (i *gatewayHandler) newDagFromReader(r io.Reader) (*dag.Node, error) {
-	// TODO(cryptix): change and remove this helper once PR1136 is merged
-	// return ufs.AddFromReader(i.api.IpfsNode(), r.Body)
-	return importer.BuildDagFromReader(
-		i.api.IpfsNode().DAG,
-		chunk.DefaultSplitter(r))
-}
-
 // TODO(btc): break this apart into separate handlers using a more expressive muxer
 func (i *gatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
@@ -302,6 +293,15 @@ func (i *gatewayHandler) getOrHeadHandler(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}
+}
+
+// TODO(cryptix):  find these helpers somewhere else
+func (i *gatewayHandler) newDagFromReader(r io.Reader) (*dag.Node, error) {
+	// TODO(cryptix): change and remove this helper once PR1136 is merged
+	// return ufs.AddFromReader(i.api.IpfsNode(), r.Body)
+	return importer.BuildDagFromReader(
+		i.api.IpfsNode().DAG,
+		chunk.DefaultSplitter(r))
 }
 
 func (i *gatewayHandler) postHandler(w http.ResponseWriter, r *http.Request) {
