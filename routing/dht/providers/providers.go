@@ -81,7 +81,7 @@ func NewProviderManager(ctx context.Context, local peer.ID, dstore ds.Datastore)
 const providersKeyPrefix = "/providers/"
 
 func mkProvKey(k key.Key) ds.Key {
-	return ds.NewKey(providersKeyPrefix + base64.URLEncoding.EncodeToString([]byte(k)))
+	return ds.NewKey(providersKeyPrefix + base64.RawURLEncoding.EncodeToString([]byte(k)))
 }
 
 func (pm *ProviderManager) Process() goprocess.Process {
@@ -132,7 +132,7 @@ func loadProvSet(dstore ds.Datastore, k key.Key) (*providerSet, error) {
 			continue
 		}
 
-		decstr, err := base64.URLEncoding.DecodeString(parts[len(parts)-1])
+		decstr, err := base64.RawURLEncoding.DecodeString(parts[len(parts)-1])
 		if err != nil {
 			log.Error("base64 decoding error: ", err)
 			continue
@@ -177,7 +177,7 @@ func (pm *ProviderManager) addProv(k key.Key, p peer.ID) error {
 }
 
 func (pm *ProviderManager) writeProviderEntry(k key.Key, p peer.ID, t time.Time) error {
-	dsk := mkProvKey(k).ChildString(base64.URLEncoding.EncodeToString([]byte(p)))
+	dsk := mkProvKey(k).ChildString(base64.RawURLEncoding.EncodeToString([]byte(p)))
 
 	buf := make([]byte, 16)
 	n := binary.PutVarint(buf, t.UnixNano())
@@ -230,7 +230,7 @@ func (pm *ProviderManager) getAllProvKeys() ([]key.Key, error) {
 			log.Warning("incorrectly formatted provider entry in datastore")
 			continue
 		}
-		decoded, err := base64.URLEncoding.DecodeString(parts[2])
+		decoded, err := base64.RawURLEncoding.DecodeString(parts[2])
 		if err != nil {
 			log.Warning("error decoding base64 provider key")
 			continue
