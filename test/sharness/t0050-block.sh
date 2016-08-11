@@ -71,7 +71,7 @@ test_expect_success "can't remove pinned block" '
 '
 
 test_expect_success "can't remove pinned block: output looks good" '
-  grep -q "$DIRHASH: pinned via recursive" block_rm_err 
+  grep -q "$DIRHASH: pinned: recursive" block_rm_err
 '
 
 test_expect_success "can't remove indirectly pinned block" '
@@ -79,7 +79,7 @@ test_expect_success "can't remove indirectly pinned block" '
 '
 
 test_expect_success "can't remove indirectly pinned block: output looks good" '
-  grep -q "$FILE1HASH: pinned via $DIRHASH" block_rm_err 
+  grep -q "$FILE1HASH: pinned via $DIRHASH" block_rm_err
 '
 
 test_expect_success "multi-block 'ipfs block rm --ignore-pins' succeeds" '
